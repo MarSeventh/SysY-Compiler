@@ -8,6 +8,7 @@ public class MIPSGenerator {
     private boolean print = true;
     private BufferedWriter out;
     private ArrayList<Register> registers = new ArrayList<>();
+    private ArrayList<Register> globalRegisters = new ArrayList<>();
     private final ArrayList<MIPSCode> mipsCode = new ArrayList<>();
     private ArrayList<IRCode> irCodes = new ArrayList<>();
     private HashMap<Integer, MIPSTable> tableStack = new HashMap<>();
@@ -22,10 +23,23 @@ public class MIPSGenerator {
 
     private int busyRegNum = 0;
     ArrayList<String> busyRegs = new ArrayList<>();
+    HashMap<TableItem, ArrayList<Register>> funcUseGlobalReg = new HashMap<>();
+
+    private boolean optimize = true;
+    private boolean optimizeMul = true;
+    private boolean optimizeDiv = true;
+    private boolean optimizeMod = true;
+    private boolean optimizeMips= true;//目标代码优化
+    private boolean optimizeGlobalReg = true;//全局寄存器优化
+    private boolean optimizeTempReg = true;//临时寄存器优化
+    private boolean optimizeBlock = true;//是否删除栈中多余的变量
 
     public MIPSGenerator(ArrayList<IRCode> irCodes) {
         for (int i = 0; i < 10; i++) {
             registers.add(new Register("$t" + i));
+        }
+        for (int i = 0; i < 8; i++) {
+            globalRegisters.add(new Register("$s" + i));
         }
         try {
             out = new BufferedWriter(new FileWriter("mips.txt"));
@@ -47,6 +61,11 @@ public class MIPSGenerator {
         }
         if (curIRCode != null && curIRCode.isMainFuncDef()) {
             genMainFuncDef();
+        }
+        if (optimizeMips) {
+            //目标代码优化
+            MIPSOptimizer mipsOptimizer = new MIPSOptimizer(mipsCode);
+            mipsOptimizer.optimize();
         }
         print();
     }
@@ -79,6 +98,9 @@ public class MIPSGenerator {
         addMIPSCode(new MIPSCode(MIPSOperator.label, null, null, curIRCode.getFuncItem().getName()));
         addMIPSCode(new MIPSCode(MIPSOperator.move, "$sp", null, "$fp"));
         MIPSTableItem funcMIPSItem = new MIPSTableItem(curIRCode.getFuncItem(), offset);
+        if (optimizeGlobalReg) {
+            funcUseGlobalReg.put(funcMIPSItem.getTableItem(), new ArrayList<>());//初始化该函数的全局寄存器闭包集合
+        }
         nowFunc = funcMIPSItem;
         curTable.addItem(funcMIPSItem);
         addLevel();
@@ -89,14 +111,42 @@ public class MIPSGenerator {
             MIPSTableItem paramMIPSItem = new MIPSTableItem(curIRCode.getDataItem(), offset++);
             curTable.addItem(paramMIPSItem);
             if (paraCount < 4) {
-                MIPSCode code = new MIPSCode(MIPSOperator.sw, "$a" + paraCount++, -paramMIPSItem.getOffset() - 4, "$fp");
-                addMIPSCode(code);
+                if (optimizeGlobalReg && paramMIPSItem.getTableItem().hasGlobalReg()) {
+                    //拥有全局寄存器，赋值施加在该寄存器上
+                    String globalRegName = paramMIPSItem.getTableItem().getGlobalRegName();
+                    allocateGlobalReg(globalRegName, paramMIPSItem);
+                    addMIPSCode(new MIPSCode(MIPSOperator.note, null, null, globalRegName + " is " + paramMIPSItem.getTableItem().getName()));
+                    addMIPSCode(new MIPSCode(MIPSOperator.move, "$a" + paraCount++, null, globalRegName));
+                } else if (optimizeTempReg && paramMIPSItem.getTableItem().hasTempReg()) {
+                    //拥有临时寄存器，赋值施加在该寄存器上
+                    String tempRegName = paramMIPSItem.getTableItem().getTempRegName();
+                    allocateTempReg(tempRegName, paramMIPSItem);
+                    addMIPSCode(new MIPSCode(MIPSOperator.note, null, null, tempRegName + " is " + paramMIPSItem.getTableItem().getName()));
+                    addMIPSCode(new MIPSCode(MIPSOperator.move, "$a" + paraCount++, null, tempRegName));
+                } else {
+                    MIPSCode code = new MIPSCode(MIPSOperator.sw, "$a" + paraCount++, -paramMIPSItem.getOffset() - 4, "$fp");
+                    addMIPSCode(code);
+                }
             } else {
                 String reg = getReg(curIRCode.getDataName());
                 //int off = 4 * (funcMIPSItem.getTableItem().getParasNum() - paraCount - 1) + 8 + 4 * nowBusyRegNum;//fp+8向上读取栈中参数，入栈是正向，出栈是反向
                 int off = 4 * (funcMIPSItem.getTableItem().getParasNum() - paraCount - 1) + 8;
                 addMIPSCode(new MIPSCode(MIPSOperator.lw, "$fp", off, reg));
-                addMIPSCode(new MIPSCode(MIPSOperator.sw, reg, -paramMIPSItem.getOffset() - 4, "$fp"));//存参数到当前活动记录
+                if (optimizeGlobalReg && paramMIPSItem.getTableItem().hasGlobalReg()) {
+                    //拥有全局寄存器，赋值施加在该寄存器上
+                    String globalRegName = paramMIPSItem.getTableItem().getGlobalRegName();
+                    allocateGlobalReg(globalRegName, paramMIPSItem);
+                    addMIPSCode(new MIPSCode(MIPSOperator.note, null, null, globalRegName + " is " + paramMIPSItem.getTableItem().getName()));
+                    addMIPSCode(new MIPSCode(MIPSOperator.move, reg, null, globalRegName));
+                } else if (optimizeTempReg && paramMIPSItem.getTableItem().hasTempReg()) {
+                    //拥有临时寄存器，赋值施加在该寄存器上
+                    String tempRegName = paramMIPSItem.getTableItem().getTempRegName();
+                    allocateTempReg(tempRegName, paramMIPSItem);
+                    addMIPSCode(new MIPSCode(MIPSOperator.note, null, null, tempRegName + " is " + paramMIPSItem.getTableItem().getName()));
+                    addMIPSCode(new MIPSCode(MIPSOperator.move, reg, null, tempRegName));
+                } else {
+                    addMIPSCode(new MIPSCode(MIPSOperator.sw, reg, -paramMIPSItem.getOffset() - 4, "$fp"));//存参数到当前活动记录
+                }
                 freeReg(reg);
                 paraCount++;
             }
@@ -111,6 +161,10 @@ public class MIPSGenerator {
         }
         deleteLevel();
         getIRCode();//跳过函数结束
+        if (optimizeGlobalReg) {
+            //释放全局寄存器池
+            freeGlobalReg();
+        }
         nowFunc = null;
     }
 
@@ -120,6 +174,9 @@ public class MIPSGenerator {
         addMIPSCode(new MIPSCode(MIPSOperator.label, null, null, "main"));
         addMIPSCode(new MIPSCode(MIPSOperator.move, "$sp", null, "$fp"));
         MIPSTableItem mainFuncMIPSItem = new MIPSTableItem(curIRCode.getFuncItem(), offset);
+        if (optimizeGlobalReg) {
+            funcUseGlobalReg.put(mainFuncMIPSItem.getTableItem(), new ArrayList<>());//初始化该函数的全局寄存器闭包集合
+        }
         nowFunc = mainFuncMIPSItem;
         curTable.addItem(mainFuncMIPSItem);
         addLevel();
@@ -129,6 +186,10 @@ public class MIPSGenerator {
         addMIPSCode(new MIPSCode(MIPSOperator.li, 10, null, "$v0"));
         addMIPSCode(new MIPSCode(MIPSOperator.syscall, null, null, null));
         getIRCode();//跳过main_end
+        if (optimizeGlobalReg) {
+            //释放全局寄存器池
+            freeGlobalReg();
+        }
         isMainFunc = false;
         nowFunc = null;
     }
@@ -170,13 +231,15 @@ public class MIPSGenerator {
             } else if (curIRCode.getOperator() == IROperator.block_end) {
                 deleteLevel();
             } else if (curIRCode.getOperator() == IROperator.OUTBLOCK) {
-                if (getLastOffset() != -1) {
-                    //System.out.println(lastMIPSItem.getName());
-                    offset = getLastOffset() + 1;
-                } else {
-                    offset = 0;
+                if (!optimizeBlock) {//不优化时，删除栈中多余的变量
+                    if (getLastOffset() != -1) {
+                        //System.out.println(lastMIPSItem.getName());
+                        offset = getLastOffset() + 1;
+                    } else {
+                        offset = 0;
+                    }
+                    addMIPSCode(new MIPSCode(MIPSOperator.addi, "$fp", -offset * 4, "$sp"));//恢复sp寄存器
                 }
-                addMIPSCode(new MIPSCode(MIPSOperator.addi, "$fp", -offset * 4, "$sp"));//恢复sp寄存器
             } else {
                 Error.mipsError("wrong irCode");
             }
@@ -190,25 +253,47 @@ public class MIPSGenerator {
     }
 
     public void genParamPush() {
-        String opReg = findReg(curIRCode.getOpIdent1());
+        String opReg = null;
+        if (!curIRCode.op1IsNum()) {
+            opReg = findReg(curIRCode.getOpIdent1());
+        }
         int paraCount = curIRCode.getOpNum2();
+        int regCount = 0;
         if (paraCount == 0) {
             //临时寄存器入栈
             for (String busyRegName : busyRegs) {
                 if (busyRegName.equals(opReg)) {
                     continue;
                 }
-                addMIPSCode(new MIPSCode(MIPSOperator.addi, "$sp", -4, "$sp"));
-                addMIPSCode(new MIPSCode(MIPSOperator.sw, busyRegName, null, "$sp"));
+                regCount++;
+                //addMIPSCode(new MIPSCode(MIPSOperator.addi, "$sp", -4, "$sp"));
+                //addMIPSCode(new MIPSCode(MIPSOperator.sw, busyRegName, 0, "$sp"));
+                addMIPSCode(new MIPSCode(MIPSOperator.sw, busyRegName, -4 * regCount, "$sp"));
             }
+        }
+        if (regCount > 0) {
+            //根据临时寄存器的数量，调整栈顶指针
+            addMIPSCode(new MIPSCode(MIPSOperator.addi, "$sp", -4 * regCount, "$sp"));
         }
         if (paraCount < 4) {
             addMIPSCode(new MIPSCode(MIPSOperator.addi, "$sp", -4, "$sp"));
             addMIPSCode(new MIPSCode(MIPSOperator.sw, "$a" + paraCount, null, "$sp"));//维护参数寄存器
-            addMIPSCode(new MIPSCode(MIPSOperator.move, opReg, null, "$a" + paraCount));
+            if (opReg != null) {
+                addMIPSCode(new MIPSCode(MIPSOperator.move, opReg, null, "$a" + paraCount));
+            } else {
+                //常数
+                addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum1(), null, "$a" + paraCount));
+            }
         } else {
             addMIPSCode(new MIPSCode(MIPSOperator.addi, "$sp", -4, "$sp"));
-            addMIPSCode(new MIPSCode(MIPSOperator.sw, opReg, null, "$sp"));
+            if (opReg != null) {
+                addMIPSCode(new MIPSCode(MIPSOperator.sw, opReg, null, "$sp"));
+            } else {
+                opReg = getReg(String.valueOf(curIRCode.getOpNum1()));//常数
+                addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum1(), null, opReg));
+                addMIPSCode(new MIPSCode(MIPSOperator.sw, opReg, null, "$sp"));
+                freeReg(opReg);
+            }
         }
         freeReg(opReg);
     }
@@ -216,20 +301,32 @@ public class MIPSGenerator {
     public void genFuncCall() {
         String funcName = curIRCode.getCallFuncName();
         TableItem funcItem = curIRCode.getFuncItem();
+        if (optimizeGlobalReg) {
+            //求全局寄存器的闭包
+            addFuncUseGlobalRegClosure(funcUseGlobalReg.get(funcItem));
+        }
         int parasNum = funcItem.getParasNum();
+        int regCount = 0;
         if (parasNum == 0) {
             //参数数量为0，保存临时寄存器
             for (String busyRegName : busyRegs) {
-                addMIPSCode(new MIPSCode(MIPSOperator.addi, "$sp", -4, "$sp"));
-                addMIPSCode(new MIPSCode(MIPSOperator.sw, busyRegName, null, "$sp"));
+                regCount++;
+                //addMIPSCode(new MIPSCode(MIPSOperator.addi, "$sp", -4, "$sp"));
+                //addMIPSCode(new MIPSCode(MIPSOperator.sw, busyRegName, 0, "$sp"));
+                addMIPSCode(new MIPSCode(MIPSOperator.sw, busyRegName, -4 * regCount, "$sp"));
             }
         }
+        if (optimizeGlobalReg) {
+            //保存全局寄存器
+            preventGlobalReg(funcItem);
+        }
         //fp 入栈
-        addMIPSCode(new MIPSCode(MIPSOperator.sw, "$fp", -4, "$sp"));
+        addMIPSCode(new MIPSCode(MIPSOperator.sw, "$fp", -4 - 4 * regCount, "$sp"));
         //ra 入栈
-        addMIPSCode(new MIPSCode(MIPSOperator.sw, "$ra", -8, "$sp"));
+        addMIPSCode(new MIPSCode(MIPSOperator.sw, "$ra", -8 - 4 * regCount, "$sp"));
         //sp 下移
-        addMIPSCode(new MIPSCode(MIPSOperator.addi, "$sp", -8, "$sp"));
+        addMIPSCode(new MIPSCode(MIPSOperator.addi, "$sp", -8 - 4 * regCount, "$sp"));
+        //addMIPSCode(new MIPSCode(MIPSOperator.addi, "$sp", -8, "$sp"));
         //跳转到函数入口
         addMIPSCode(new MIPSCode(MIPSOperator.jal, null, null, funcName));
 
@@ -240,6 +337,10 @@ public class MIPSGenerator {
         addMIPSCode(new MIPSCode(MIPSOperator.lw, "$sp", 0, "$ra"));
         //从栈中取出$fp
         addMIPSCode(new MIPSCode(MIPSOperator.lw, "$sp", 4, "$fp"));
+        if (optimizeGlobalReg) {
+            //恢复全局寄存器
+            recoverGlobalReg(funcItem);
+        }
         //恢复参数寄存器
         for (int i = 0; i < Math.min(parasNum, 4); i++) {
             addMIPSCode(new MIPSCode(MIPSOperator.lw, "$sp", 4 * (parasNum + 2) - 4 * (i + 1), "$a" + i));
@@ -289,10 +390,24 @@ public class MIPSGenerator {
                     freeReg(op1Reg);
                 } else {
                     //assign, a, null, t1
-                    if (srcMIPSItem.getTableItem().isGlobal()) {
-                        addMIPSCode(new MIPSCode(MIPSOperator.lw, "Global_" + curIRCode.getOpIdent1(), null, desReg));
+                    if (optimizeGlobalReg && srcMIPSItem.getTableItem().hasGlobalReg()) {
+                        //拥有全局寄存器
+                        String globalRegName = srcMIPSItem.getTableItem().getGlobalRegName();
+                        allocateGlobalReg(globalRegName, srcMIPSItem);
+                        addMIPSCode(new MIPSCode(MIPSOperator.note, null, null, globalRegName + " is " + srcMIPSItem.getTableItem().getName()));
+                        addMIPSCode(new MIPSCode(MIPSOperator.move, globalRegName, null, desReg));
+                    } else if (optimizeTempReg && srcMIPSItem.getTableItem().hasTempReg()) {
+                        //拥有临时寄存器
+                        String tempRegName = srcMIPSItem.getTableItem().getTempRegName();
+                        allocateTempReg(tempRegName, srcMIPSItem);
+                        addMIPSCode(new MIPSCode(MIPSOperator.note, null, null, tempRegName + " is " + srcMIPSItem.getTableItem().getName()));
+                        addMIPSCode(new MIPSCode(MIPSOperator.move, tempRegName, null, desReg));
                     } else {
-                        addMIPSCode(new MIPSCode(MIPSOperator.lw, "$fp", -srcMIPSItem.getOffset() - 4, desReg));
+                        if (srcMIPSItem.getTableItem().isGlobal()) {
+                            addMIPSCode(new MIPSCode(MIPSOperator.lw, "Global_" + curIRCode.getOpIdent1(), null, desReg));
+                        } else {
+                            addMIPSCode(new MIPSCode(MIPSOperator.lw, "$fp", -srcMIPSItem.getOffset() - 4, desReg));
+                        }
                     }
                 }
             }
@@ -367,21 +482,7 @@ public class MIPSGenerator {
                 freeReg(addressReg);
             } else {
                 //非数组
-                String opReg1;
-                if (curIRCode.op1IsNum()) {
-                    opReg1 = curIRCode.getOpNum1() == 0 ? "$0" : getReg(String.valueOf(curIRCode.getOpNum1()));
-                    if (opReg1.equals("$0")) {
-                        addMIPSCode(new MIPSCode(MIPSOperator.sw, opReg1, -desMIPSItem.getOffset() - 4, "$fp"));
-                    } else {
-                        addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum1(), null, opReg1));
-                        addMIPSCode(new MIPSCode(MIPSOperator.sw, opReg1, -desMIPSItem.getOffset() - 4, "$fp"));
-                        freeReg(opReg1);
-                    }
-                } else {
-                    opReg1 = findReg(curIRCode.getOpIdent1());
-                    addMIPSCode(new MIPSCode(MIPSOperator.sw, opReg1, -desMIPSItem.getOffset() - 4, "$fp"));
-                    freeReg(opReg1);
-                }
+                assignToVar(desMIPSItem);
             }
         } else {
             //局部变量
@@ -411,22 +512,54 @@ public class MIPSGenerator {
                 freeReg(opReg1);
             } else {
                 //非数组
-                String opReg1;
-                if (curIRCode.op1IsNum()) {
-                    opReg1 = curIRCode.getOpNum1() == 0 ? "$0" : getReg(String.valueOf(curIRCode.getOpNum1()));
-                    if (opReg1.equals("$0")) {
-                        addMIPSCode(new MIPSCode(MIPSOperator.sw, opReg1, -desMIPSItem.getOffset() - 4, "$fp"));
-                    } else {
-                        addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum1(), null, opReg1));
-                        addMIPSCode(new MIPSCode(MIPSOperator.sw, opReg1, -desMIPSItem.getOffset() - 4, "$fp"));
-                        freeReg(opReg1);
-                    }
+                assignToVar(desMIPSItem);
+            }
+        }
+    }
+
+    private void assignToVar(MIPSTableItem desMIPSItem) {
+        String opReg1;
+        if (curIRCode.op1IsNum()) {
+            if (optimizeGlobalReg && desMIPSItem.getTableItem().hasGlobalReg()) {
+                //拥有全局寄存器，赋值施加在该寄存器上
+                String globalRegName = desMIPSItem.getTableItem().getGlobalRegName();
+                addMIPSCode(new MIPSCode(MIPSOperator.note, null, null, globalRegName + " is " + desMIPSItem.getTableItem().getName()));
+                addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum1(), null, globalRegName));
+                allocateGlobalReg(globalRegName, desMIPSItem);
+            } else if (optimizeTempReg && desMIPSItem.getTableItem().hasTempReg()) {
+                //拥有临时寄存器，赋值施加在该寄存器上
+                String tempRegName = desMIPSItem.getTableItem().getTempRegName();
+                addMIPSCode(new MIPSCode(MIPSOperator.note, null, null, tempRegName + " is " + desMIPSItem.getTableItem().getName()));
+                addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum1(), null, tempRegName));
+                allocateTempReg(tempRegName, desMIPSItem);
+            } else {
+                opReg1 = curIRCode.getOpNum1() == 0 ? "$0" : getReg(String.valueOf(curIRCode.getOpNum1()));
+                if (opReg1.equals("$0")) {
+                    addMIPSCode(new MIPSCode(MIPSOperator.sw, opReg1, -desMIPSItem.getOffset() - 4, "$fp"));
                 } else {
-                    opReg1 = findReg(curIRCode.getOpIdent1());
+                    addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum1(), null, opReg1));
                     addMIPSCode(new MIPSCode(MIPSOperator.sw, opReg1, -desMIPSItem.getOffset() - 4, "$fp"));
                     freeReg(opReg1);
                 }
             }
+        } else {
+            opReg1 = findReg(curIRCode.getOpIdent1());
+            if (optimizeGlobalReg && desMIPSItem.getTableItem().hasGlobalReg()) {
+                //拥有全局寄存器，赋值施加在该寄存器上
+                String globalRegName = desMIPSItem.getTableItem().getGlobalRegName();
+                addMIPSCode(new MIPSCode(MIPSOperator.note, null, null, globalRegName + " is " + desMIPSItem.getTableItem().getName()));
+                addMIPSCode(new MIPSCode(MIPSOperator.move, opReg1, null, globalRegName));
+                allocateGlobalReg(globalRegName, desMIPSItem);
+            } else if (optimizeTempReg && desMIPSItem.getTableItem().hasTempReg()) {
+                //拥有临时寄存器，赋值施加在该寄存器上
+                String tempRegName = desMIPSItem.getTableItem().getTempRegName();
+                addMIPSCode(new MIPSCode(MIPSOperator.note, null, null, tempRegName + " is " + desMIPSItem.getTableItem().getName()));
+                addMIPSCode(new MIPSCode(MIPSOperator.move, opReg1, null, tempRegName));
+                allocateTempReg(tempRegName, desMIPSItem);
+            } else {
+                addMIPSCode(new MIPSCode(MIPSOperator.sw, opReg1, -desMIPSItem.getOffset() - 4, "$fp"));
+            }
+            freeReg(opReg1);
         }
     }
 
@@ -485,11 +618,19 @@ public class MIPSGenerator {
             }
         } else if (curIRCode.op1IsNum()) {
             String op2Reg = findReg(curIRCode.getOpIdent2());
-            addMIPSCode(new MIPSCode(MIPSOperator.beq, op2Reg, curIRCode.getOpNum1(), curIRCode.getResultIdent()));
+            if (curIRCode.getOpNum1() != 0) {
+                addMIPSCode(new MIPSCode(MIPSOperator.beq, op2Reg, curIRCode.getOpNum1(), curIRCode.getResultIdent()));
+            } else {//优化beq
+                addMIPSCode(new MIPSCode(MIPSOperator.beqz, op2Reg, null, curIRCode.getResultIdent()));
+            }
             freeReg(op2Reg);
         } else if (curIRCode.op2IsNum()) {
             String op1Reg = findReg(curIRCode.getOpIdent1());
-            addMIPSCode(new MIPSCode(MIPSOperator.beq, op1Reg, curIRCode.getOpNum2(), curIRCode.getResultIdent()));
+            if (curIRCode.getOpNum2() != 0) {
+                addMIPSCode(new MIPSCode(MIPSOperator.beq, op1Reg, curIRCode.getOpNum2(), curIRCode.getResultIdent()));
+            } else {//优化beq
+                addMIPSCode(new MIPSCode(MIPSOperator.beqz, op1Reg, null, curIRCode.getResultIdent()));
+            }
             if (!curIRCode.isNeedStay()) {
                 //System.out.println(curIRCode.print());
                 freeReg(op1Reg);
@@ -510,11 +651,19 @@ public class MIPSGenerator {
             }
         } else if (curIRCode.op1IsNum()) {
             String op2Reg = findReg(curIRCode.getOpIdent2());
-            addMIPSCode(new MIPSCode(MIPSOperator.bne, op2Reg, curIRCode.getOpNum1(), curIRCode.getResultIdent()));
+            if (curIRCode.getOpNum1() != 0) {
+                addMIPSCode(new MIPSCode(MIPSOperator.bne, op2Reg, curIRCode.getOpNum1(), curIRCode.getResultIdent()));
+            } else {//优化bne
+                addMIPSCode(new MIPSCode(MIPSOperator.bnez, op2Reg, null, curIRCode.getResultIdent()));
+            }
             freeReg(op2Reg);
         } else if (curIRCode.op2IsNum()) {
             String op1Reg = findReg(curIRCode.getOpIdent1());
-            addMIPSCode(new MIPSCode(MIPSOperator.bne, op1Reg, curIRCode.getOpNum2(), curIRCode.getResultIdent()));
+            if (curIRCode.getOpNum2() != 0) {
+                addMIPSCode(new MIPSCode(MIPSOperator.bne, op1Reg, curIRCode.getOpNum2(), curIRCode.getResultIdent()));
+            } else {//优化bne
+                addMIPSCode(new MIPSCode(MIPSOperator.bnez, op1Reg, null, curIRCode.getResultIdent()));
+            }
             if (!curIRCode.isNeedStay()) {
                 freeReg(op1Reg);
             }
@@ -534,11 +683,19 @@ public class MIPSGenerator {
             }
         } else if (curIRCode.op1IsNum()) {
             String op2Reg = findReg(curIRCode.getOpIdent2());
-            addMIPSCode(new MIPSCode(MIPSOperator.ble, op2Reg, curIRCode.getOpNum1(), curIRCode.getResultIdent()));
+            if (curIRCode.getOpNum1() != 0) {
+                addMIPSCode(new MIPSCode(MIPSOperator.ble, op2Reg, curIRCode.getOpNum1(), curIRCode.getResultIdent()));
+            } else {//优化bge
+                addMIPSCode(new MIPSCode(MIPSOperator.blez, op2Reg, null, curIRCode.getResultIdent()));
+            }
             freeReg(op2Reg);
         } else if (curIRCode.op2IsNum()) {
             String op1Reg = findReg(curIRCode.getOpIdent1());
-            addMIPSCode(new MIPSCode(MIPSOperator.bge, op1Reg, curIRCode.getOpNum2(), curIRCode.getResultIdent()));
+            if (curIRCode.getOpNum2() != 0) {
+                addMIPSCode(new MIPSCode(MIPSOperator.bge, op1Reg, curIRCode.getOpNum2(), curIRCode.getResultIdent()));
+            } else {//优化bge
+                addMIPSCode(new MIPSCode(MIPSOperator.bgez, op1Reg, null, curIRCode.getResultIdent()));
+            }
             if (!curIRCode.isNeedStay()) {
                 freeReg(op1Reg);
             }
@@ -558,11 +715,19 @@ public class MIPSGenerator {
             }
         } else if (curIRCode.op1IsNum()) {
             String op2Reg = findReg(curIRCode.getOpIdent2());
-            addMIPSCode(new MIPSCode(MIPSOperator.blt, op2Reg, curIRCode.getOpNum1(), curIRCode.getResultIdent()));//为考虑常数，进行一个转换
+            if (curIRCode.getOpNum1() != 0) {
+                addMIPSCode(new MIPSCode(MIPSOperator.blt, op2Reg, curIRCode.getOpNum1(), curIRCode.getResultIdent()));
+            } else {//优化bgt
+                addMIPSCode(new MIPSCode(MIPSOperator.bltz, op2Reg, null, curIRCode.getResultIdent()));
+            }
             freeReg(op2Reg);
         } else if (curIRCode.op2IsNum()) {
             String op1Reg = findReg(curIRCode.getOpIdent1());
-            addMIPSCode(new MIPSCode(MIPSOperator.bgt, op1Reg, curIRCode.getOpNum2(), curIRCode.getResultIdent()));
+            if (curIRCode.getOpNum2() != 0) {
+                addMIPSCode(new MIPSCode(MIPSOperator.bgt, op1Reg, curIRCode.getOpNum2(), curIRCode.getResultIdent()));
+            } else {//优化bgt
+                addMIPSCode(new MIPSCode(MIPSOperator.bgtz, op1Reg, null, curIRCode.getResultIdent()));
+            }
             if (!curIRCode.isNeedStay()) {
                 freeReg(op1Reg);
             }
@@ -582,11 +747,19 @@ public class MIPSGenerator {
             }
         } else if (curIRCode.op1IsNum()) {
             String op2Reg = findReg(curIRCode.getOpIdent2());
-            addMIPSCode(new MIPSCode(MIPSOperator.bge, op2Reg, curIRCode.getOpNum1(), curIRCode.getResultIdent()));
+            if (curIRCode.getOpNum1() != 0) {
+                addMIPSCode(new MIPSCode(MIPSOperator.bge, op2Reg, curIRCode.getOpNum1(), curIRCode.getResultIdent()));
+            } else {//优化ble
+                addMIPSCode(new MIPSCode(MIPSOperator.bgez, op2Reg, null, curIRCode.getResultIdent()));
+            }
             freeReg(op2Reg);
         } else if (curIRCode.op2IsNum()) {
             String op1Reg = findReg(curIRCode.getOpIdent1());
-            addMIPSCode(new MIPSCode(MIPSOperator.ble, op1Reg, curIRCode.getOpNum2(), curIRCode.getResultIdent()));
+            if (curIRCode.getOpNum2() != 0) {
+                addMIPSCode(new MIPSCode(MIPSOperator.ble, op1Reg, curIRCode.getOpNum2(), curIRCode.getResultIdent()));
+            } else {
+                addMIPSCode(new MIPSCode(MIPSOperator.blez, op1Reg, null, curIRCode.getResultIdent()));
+            }
             if (!curIRCode.isNeedStay()) {
                 freeReg(op1Reg);
             }
@@ -606,11 +779,19 @@ public class MIPSGenerator {
             }
         } else if (curIRCode.op1IsNum()) {
             String op2Reg = findReg(curIRCode.getOpIdent2());
-            addMIPSCode(new MIPSCode(MIPSOperator.bgt, op2Reg, curIRCode.getOpNum1(), curIRCode.getResultIdent()));
+            if (curIRCode.getOpNum1() != 0) {
+                addMIPSCode(new MIPSCode(MIPSOperator.bgt, op2Reg, curIRCode.getOpNum1(), curIRCode.getResultIdent()));
+            } else {//优化blt
+                addMIPSCode(new MIPSCode(MIPSOperator.bgtz, op2Reg, null, curIRCode.getResultIdent()));
+            }
             freeReg(op2Reg);
         } else if (curIRCode.op2IsNum()) {
             String op1Reg = findReg(curIRCode.getOpIdent1());
-            addMIPSCode(new MIPSCode(MIPSOperator.blt, op1Reg, curIRCode.getOpNum2(), curIRCode.getResultIdent()));
+            if (curIRCode.getOpNum2() != 0) {
+                addMIPSCode(new MIPSCode(MIPSOperator.blt, op1Reg, curIRCode.getOpNum2(), curIRCode.getResultIdent()));
+            } else {//优化blt
+                addMIPSCode(new MIPSCode(MIPSOperator.bltz, op1Reg, null, curIRCode.getResultIdent()));
+            }
             if (!curIRCode.isNeedStay()) {
                 freeReg(op1Reg);
             }
@@ -739,7 +920,14 @@ public class MIPSGenerator {
     }
 
     public void genPrintPush() {
-        String intSrcReg = findReg(curIRCode.getOpIdent1());
+        String intSrcReg = null;
+        if (!curIRCode.op1IsNum()) {
+            intSrcReg = findReg(curIRCode.getOpIdent1());
+        } else {
+            //常数
+            intSrcReg = getReg(String.valueOf(curIRCode.getOpNum1()));
+            addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum1(), null, intSrcReg));
+        }
         addMIPSCode(new MIPSCode(MIPSOperator.addi, "$sp", -4, "$sp"));
         addMIPSCode(new MIPSCode(MIPSOperator.sw, intSrcReg, null, "$sp"));
         freeReg(intSrcReg);
@@ -753,6 +941,18 @@ public class MIPSGenerator {
         MIPSTableItem identItem = getVarConstParamItem(identName);
         if (identItem == null) {
             Error.mipsError(curIRCode.print() + ": getint变量未定义");
+        } else if (optimizeGlobalReg && identItem.getTableItem().hasGlobalReg()) {
+            //拥有全局寄存器，赋值施加在该寄存器上
+            String globalRegName = identItem.getTableItem().getGlobalRegName();
+            addMIPSCode(new MIPSCode(MIPSOperator.note, null, null, globalRegName + " is " + identItem.getTableItem().getName()));
+            addMIPSCode(new MIPSCode(MIPSOperator.move, "$v0", null, globalRegName));
+            allocateGlobalReg(globalRegName, identItem);
+        } else if (optimizeTempReg && identItem.getTableItem().hasTempReg()) {
+            //拥有临时寄存器，赋值施加在该寄存器上
+            String tempRegName = identItem.getTableItem().getTempRegName();
+            addMIPSCode(new MIPSCode(MIPSOperator.note, null, null, tempRegName + " is " + identItem.getTableItem().getName()));
+            addMIPSCode(new MIPSCode(MIPSOperator.move, "$v0", null, tempRegName));
+            allocateTempReg(tempRegName, identItem);
         } else if (identItem.getTableItem().isGlobal()) {
             //全局变量
             if (curIRCode.op2IsNum() || curIRCode.getOpIdent2() == null) {
@@ -856,10 +1056,8 @@ public class MIPSGenerator {
             Error.mipsError(curIRCode.print() + ": add两个操作数不应该同时为常数");
         }
         if (curIRCode.op1IsNum() && curIRCode.op2IsNum()) {
-            String op1Reg = getReg(String.valueOf(curIRCode.getOpNum1()));
             String desReg = getReg(curIRCode.getResultIdent());
-            addMIPSCode(new MIPSCode(MIPSOperator.addiu, op1Reg, curIRCode.getOpNum2(), desReg));
-            freeReg(op1Reg);//释放常数寄存器
+            addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum1() + curIRCode.getOpNum2(), null, desReg));
         } else if (curIRCode.op1IsNum()) {
             String op2Reg = findReg(curIRCode.getOpIdent2());
             String desReg = getReg(curIRCode.getResultIdent());
@@ -885,10 +1083,8 @@ public class MIPSGenerator {
             Error.mipsError(curIRCode.print() + ": sub两个操作数不应该同时为常数");
         }
         if (curIRCode.op1IsNum() && curIRCode.op2IsNum()) {
-            String op1Reg = getReg(String.valueOf(curIRCode.getOpNum1()));
             String desReg = getReg(curIRCode.getResultIdent());
-            addMIPSCode(new MIPSCode(MIPSOperator.subiu, op1Reg, curIRCode.getOpNum2(), desReg));
-            freeReg(op1Reg);//释放常数寄存器
+            addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum1() - curIRCode.getOpNum2(), null, desReg));
         } else if (curIRCode.op1IsNum()) {
             String op1Reg = curIRCode.getOpNum1() == 0 ? "$0" : getReg(String.valueOf(curIRCode.getOpNum1()));
             String op2Reg = findReg(curIRCode.getOpIdent2());
@@ -900,7 +1096,7 @@ public class MIPSGenerator {
         } else if (curIRCode.op2IsNum()) {
             String op1Reg = findReg(curIRCode.getOpIdent1());
             String desReg = getReg(curIRCode.getResultIdent());
-            addMIPSCode(new MIPSCode(MIPSOperator.subiu, op1Reg, curIRCode.getOpNum2(), desReg));
+            addMIPSCode(new MIPSCode(MIPSOperator.addi, op1Reg, -curIRCode.getOpNum2(), desReg));
             freeReg(op1Reg);
         } else {
             String op1Reg = findReg(curIRCode.getOpIdent1());
@@ -917,32 +1113,17 @@ public class MIPSGenerator {
             Error.mipsError(curIRCode.print() + ": mul两个操作数不应该同时为常数");
         }
         if (curIRCode.op1IsNum() && curIRCode.op2IsNum()) {
-            String op1Reg = getReg(String.valueOf(curIRCode.getOpNum1()));
-            String op2Reg = getReg(String.valueOf(curIRCode.getOpNum2()));
             String desReg = getReg(curIRCode.getResultIdent());
-            addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum1(), null, op1Reg));//常数opNum1赋值给寄存器
-            addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum2(), null, op2Reg));//常数opNum2赋值给寄存器
-            addMIPSCode(new MIPSCode(MIPSOperator.mult, op1Reg, op2Reg, null));
-            addMIPSCode(new MIPSCode(MIPSOperator.mflo, null, null, desReg));
-            freeReg(op1Reg);//释放常数寄存器
-            freeReg(op2Reg);//释放常数寄存器
+            addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum1() * curIRCode.getOpNum2(), null, desReg));
         } else if (curIRCode.op1IsNum()) {
-            String op1Reg = getReg(String.valueOf(curIRCode.getOpNum1()));
             String op2Reg = findReg(curIRCode.getOpIdent2());
             String desReg = getReg(curIRCode.getResultIdent());
-            addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum1(), null, op1Reg));//常数opNum1赋值给寄存器
-            addMIPSCode(new MIPSCode(MIPSOperator.mult, op1Reg, op2Reg, null));
-            addMIPSCode(new MIPSCode(MIPSOperator.mflo, null, null, desReg));
-            freeReg(op1Reg);//释放常数寄存器
+            optimizeMulRegImm(op2Reg, curIRCode.getOpNum1(), desReg);
             freeReg(op2Reg);
         } else if (curIRCode.op2IsNum()) {
             String op1Reg = findReg(curIRCode.getOpIdent1());
-            String op2Reg = getReg(String.valueOf(curIRCode.getOpNum2()));
             String desReg = getReg(curIRCode.getResultIdent());
-            addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum2(), null, op2Reg));//常数opNum2赋值给寄存器
-            addMIPSCode(new MIPSCode(MIPSOperator.mult, op1Reg, op2Reg, null));
-            addMIPSCode(new MIPSCode(MIPSOperator.mflo, null, null, desReg));
-            freeReg(op2Reg);//释放常数寄存器
+            optimizeMulRegImm(op1Reg, curIRCode.getOpNum2(), desReg);
             freeReg(op1Reg);
         } else {
             String op1Reg = findReg(curIRCode.getOpIdent1());
@@ -960,15 +1141,8 @@ public class MIPSGenerator {
             Error.mipsError(curIRCode.print() + ": div两个操作数不应该同时为常数");
         }
         if (curIRCode.op1IsNum() && curIRCode.op2IsNum()) {
-            String op1Reg = getReg(String.valueOf(curIRCode.getOpNum1()));
-            String op2Reg = getReg(String.valueOf(curIRCode.getOpNum2()));
             String desReg = getReg(curIRCode.getResultIdent());
-            addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum1(), null, op1Reg));//常数opNum1赋值给寄存器
-            addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum2(), null, op2Reg));//常数opNum2赋值给寄存器
-            addMIPSCode(new MIPSCode(MIPSOperator.div, op1Reg, op2Reg, null));
-            addMIPSCode(new MIPSCode(MIPSOperator.mflo, null, null, desReg));
-            freeReg(op1Reg);//释放常数寄存器
-            freeReg(op2Reg);//释放常数寄存器
+            addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum1() / curIRCode.getOpNum2(), null, desReg));
         } else if (curIRCode.op1IsNum()) {
             String op1Reg = getReg(String.valueOf(curIRCode.getOpNum1()));
             String op2Reg = findReg(curIRCode.getOpIdent2());
@@ -980,12 +1154,8 @@ public class MIPSGenerator {
             freeReg(op2Reg);
         } else if (curIRCode.op2IsNum()) {
             String op1Reg = findReg(curIRCode.getOpIdent1());
-            String op2Reg = getReg(String.valueOf(curIRCode.getOpNum2()));
             String desReg = getReg(curIRCode.getResultIdent());
-            addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum2(), null, op2Reg));//常数opNum2赋值给寄存器
-            addMIPSCode(new MIPSCode(MIPSOperator.div, op1Reg, op2Reg, null));
-            addMIPSCode(new MIPSCode(MIPSOperator.mflo, null, null, desReg));
-            freeReg(op2Reg);//释放常数寄存器
+            optimizeDiv(op1Reg, curIRCode.getOpNum2(), desReg);
             freeReg(op1Reg);
         } else {
             String op1Reg = findReg(curIRCode.getOpIdent1());
@@ -1003,15 +1173,8 @@ public class MIPSGenerator {
             Error.mipsError(curIRCode.print() + ": mod两个操作数不应该同时为常数");
         }
         if (curIRCode.op1IsNum() && curIRCode.op2IsNum()) {
-            String op1Reg = getReg(String.valueOf(curIRCode.getOpNum1()));
-            String op2Reg = getReg(String.valueOf(curIRCode.getOpNum2()));
             String desReg = getReg(curIRCode.getResultIdent());
-            addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum1(), null, op1Reg));//常数opNum1赋值给寄存器
-            addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum2(), null, op2Reg));//常数opNum2赋值给寄存器
-            addMIPSCode(new MIPSCode(MIPSOperator.div, op1Reg, op2Reg, null));
-            addMIPSCode(new MIPSCode(MIPSOperator.mfhi, null, null, desReg));
-            freeReg(op1Reg);//释放常数寄存器
-            freeReg(op2Reg);//释放常数寄存器
+            addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum1() % curIRCode.getOpNum2(), null, desReg));
         } else if (curIRCode.op1IsNum()) {
             String op1Reg = getReg(String.valueOf(curIRCode.getOpNum1()));
             String op2Reg = findReg(curIRCode.getOpIdent2());
@@ -1023,12 +1186,8 @@ public class MIPSGenerator {
             freeReg(op2Reg);
         } else if (curIRCode.op2IsNum()) {
             String op1Reg = findReg(curIRCode.getOpIdent1());
-            String op2Reg = getReg(String.valueOf(curIRCode.getOpNum2()));
             String desReg = getReg(curIRCode.getResultIdent());
-            addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum2(), null, op2Reg));//常数opNum2赋值给寄存器
-            addMIPSCode(new MIPSCode(MIPSOperator.div, op1Reg, op2Reg, null));
-            addMIPSCode(new MIPSCode(MIPSOperator.mfhi, null, null, desReg));
-            freeReg(op2Reg);//释放常数寄存器
+            optimizeMod(op1Reg, curIRCode.getOpNum2(), desReg);
             freeReg(op1Reg);
         } else {
             String op1Reg = findReg(curIRCode.getOpIdent1());
@@ -1054,11 +1213,13 @@ public class MIPSGenerator {
             }
         } else if (curIRCode.op1IsNum()) {
             String op2Reg = findReg(curIRCode.getOpIdent2());
+            String desReg = findReg(curIRCode.getResultIdent());
             if (curIRCode.getOpNum1() != 0) {
-                addMIPSCode(new MIPSCode(MIPSOperator.sne, op2Reg, "$0", op2Reg));
+                addMIPSCode(new MIPSCode(MIPSOperator.sne, op2Reg, "$0", desReg));
             } else {
-                addMIPSCode(new MIPSCode(MIPSOperator.li, 0, null, op2Reg));
+                addMIPSCode(new MIPSCode(MIPSOperator.li, 0, null, desReg));
             }
+            freeReg(op2Reg);
         } else if (curIRCode.op2IsNum()) {
             String op1Reg = findReg(curIRCode.getOpIdent1());
             if (curIRCode.getOpNum2() != 0) {
@@ -1081,13 +1242,17 @@ public class MIPSGenerator {
             Error.mipsError(curIRCode.print() + ": or两个操作数不应该同时为常数");
         }
         if (curIRCode.op1IsNum() && curIRCode.op2IsNum()) {
-            String op1Reg = getReg(String.valueOf(curIRCode.getOpNum1()));
             String desReg = getReg(curIRCode.getResultIdent());
-            addMIPSCode(new MIPSCode(MIPSOperator.ori, op1Reg, curIRCode.getOpNum2(), desReg));
-            freeReg(op1Reg);//释放常数寄存器
+            if (curIRCode.getOpNum1() != 0 || curIRCode.getOpNum2() != 0) {
+                addMIPSCode(new MIPSCode(MIPSOperator.li, 1, null, desReg));
+            } else {
+                addMIPSCode(new MIPSCode(MIPSOperator.li, 0, null, desReg));
+            }
         } else if (curIRCode.op1IsNum()) {
             String op2Reg = findReg(curIRCode.getOpIdent2());
-            addMIPSCode(new MIPSCode(MIPSOperator.ori, op2Reg, curIRCode.getOpNum1(), op2Reg));
+            String desReg = findReg(curIRCode.getResultIdent());
+            addMIPSCode(new MIPSCode(MIPSOperator.ori, op2Reg, curIRCode.getOpNum1(), desReg));
+            freeReg(op2Reg);
         } else if (curIRCode.op2IsNum()) {
             String op1Reg = findReg(curIRCode.getOpIdent1());
             addMIPSCode(new MIPSCode(MIPSOperator.ori, op1Reg, curIRCode.getOpNum2(), op1Reg));
@@ -1104,10 +1269,12 @@ public class MIPSGenerator {
             Error.mipsError(curIRCode.print() + ": not操作数不应该为常数");
         }
         if (curIRCode.op2IsNum()) {
-            String op2Reg = getReg(String.valueOf(curIRCode.getOpNum2()));
             String desReg = getReg(curIRCode.getResultIdent());
-            addMIPSCode(new MIPSCode(MIPSOperator.seq, op2Reg, "$0", desReg));
-            freeReg(op2Reg);//释放常数寄存器
+            if (curIRCode.getOpNum2() != 0) {
+                addMIPSCode(new MIPSCode(MIPSOperator.li, 0, null, desReg));
+            } else {
+                addMIPSCode(new MIPSCode(MIPSOperator.li, 1, null, desReg));
+            }
         } else {
             String op2Reg = findReg(curIRCode.getOpIdent2());
             String desReg = getReg(curIRCode.getResultIdent());
@@ -1284,6 +1451,180 @@ public class MIPSGenerator {
         }
     }
 
+    public void optimizeMulRegImm(String opReg, int opNum, String desReg) {
+        if (!optimizeMul) {
+            String immReg = getReg(String.valueOf(opNum));
+            addMIPSCode(new MIPSCode(MIPSOperator.li, opNum, null, immReg));//常数opNum赋值给寄存器
+            addMIPSCode(new MIPSCode(MIPSOperator.mult, immReg, opReg, null));
+            addMIPSCode(new MIPSCode(MIPSOperator.mflo, null, null, desReg));
+            freeReg(immReg);//释放常数寄存器
+        } else {
+            boolean isNegate = opNum < 0;
+            if (isNegate) {
+                opNum = -opNum;//后面都考虑非负整数
+            }
+            if (opNum == 0) {
+                addMIPSCode(new MIPSCode(MIPSOperator.li, 0, null, desReg));
+            } else if (opNum == 1) {
+                addMIPSCode(new MIPSCode(MIPSOperator.move, opReg, null, desReg));
+                if (isNegate) {
+                    addMIPSCode(new MIPSCode(MIPSOperator.subu, "$0", desReg, desReg));
+                }
+            } else if (isPowerOfTwo(opNum)) {
+                int shift = (int) (Math.log(opNum) / Math.log(2));
+                addMIPSCode(new MIPSCode(MIPSOperator.sll, opReg, shift, desReg));
+                if (isNegate) {
+                    addMIPSCode(new MIPSCode(MIPSOperator.subu, "$0", desReg, desReg));
+                }
+            } else if (nearPowerOfTwo(opNum) != 0) {
+                int off = nearPowerOfTwo(opNum);
+                int shift = (int) (Math.log(opNum + off) / Math.log(2));
+                addMIPSCode(new MIPSCode(MIPSOperator.sll, opReg, shift, desReg));
+                for (int i = 0; i < Math.abs(off); i++) {
+                    addMIPSCode(new MIPSCode(off > 0 ? MIPSOperator.subu : MIPSOperator.addu, desReg, opReg, desReg));
+                }
+                if (isNegate) {
+                    addMIPSCode(new MIPSCode(MIPSOperator.subu, "$0", desReg, desReg));
+                }
+            } else {
+                if (isNegate) {
+                    opNum = -opNum;//恢复操作数
+                }
+                String immReg = getReg(String.valueOf(opNum));
+                addMIPSCode(new MIPSCode(MIPSOperator.li, opNum, null, immReg));//常数opNum赋值给寄存器
+                addMIPSCode(new MIPSCode(MIPSOperator.mult, immReg, opReg, null));
+                addMIPSCode(new MIPSCode(MIPSOperator.mflo, null, null, desReg));
+                freeReg(immReg);//释放常数寄存器
+            }
+        }
+    }
+
+    public void optimizeDiv(String opReg, int divisor, String desReg) {
+        if (!optimizeDiv) {
+            String immReg = getReg(String.valueOf(divisor));
+            addMIPSCode(new MIPSCode(MIPSOperator.li, divisor, null, immReg));//常数opNum赋值给寄存器
+            addMIPSCode(new MIPSCode(MIPSOperator.div, opReg, immReg, null));
+            addMIPSCode(new MIPSCode(MIPSOperator.mflo, null, null, desReg));
+            freeReg(immReg);//释放常数寄存器
+        } else {
+            boolean isNegate = divisor < 0;
+            if (isNegate) {
+                divisor = -divisor;//后面都考虑非负整数
+            }
+            if (divisor == 1) {
+                addMIPSCode(new MIPSCode(MIPSOperator.move, opReg, null, desReg));
+                if (isNegate) {
+                    addMIPSCode(new MIPSCode(MIPSOperator.subu, "$0", desReg, desReg));
+                }
+            } else if (isPowerOfTwo(divisor)) {
+                int shift = (int) (Math.log(divisor) / Math.log(2));
+                String tempReg = getReg("temp");
+                addMIPSCode(new MIPSCode(MIPSOperator.sll, opReg, 32 - shift, desReg));
+                addMIPSCode(new MIPSCode(MIPSOperator.sltu, "$0", desReg, desReg));
+                addMIPSCode(new MIPSCode(MIPSOperator.slt, opReg, "$0", tempReg));//被除数为负数置1
+                addMIPSCode(new MIPSCode(MIPSOperator.and, tempReg, desReg, tempReg));
+                addMIPSCode(new MIPSCode(MIPSOperator.sra, opReg, shift, desReg));
+                addMIPSCode(new MIPSCode(MIPSOperator.addu, desReg, tempReg, desReg));
+                freeReg(tempReg);
+                if (isNegate) {
+                    addMIPSCode(new MIPSCode(MIPSOperator.subu, "$0", desReg, desReg));
+                }
+            } else {
+                long multiplier = chooseMultiplier(divisor, 32);
+                if (multiplier != -1 && multiplier < Math.pow(2, 32) + Math.pow(2, 31)) {//能找到multiplier
+                    if (multiplier < Math.pow(2, 31)) {//multiplier不会溢出，且在int范围内
+                        int l = (int) (Math.floor(Math.log(multiplier * divisor) / Math.log(2)) - 32);
+                        String multiplierReg = getReg(String.valueOf(multiplier));
+                        addMIPSCode(new MIPSCode(MIPSOperator.li, (int) multiplier, null, multiplierReg));
+                        addMIPSCode(new MIPSCode(MIPSOperator.mult, opReg, multiplierReg, null));
+                        addMIPSCode(new MIPSCode(MIPSOperator.mfhi, null, null, desReg));
+                        addMIPSCode(new MIPSCode(MIPSOperator.sra, desReg, l, desReg));
+
+                        addMIPSCode(new MIPSCode(MIPSOperator.slt, opReg, "$0", multiplierReg));//被除数为负数置1
+                        addMIPSCode(new MIPSCode(MIPSOperator.addu, desReg, multiplierReg, desReg));
+                        freeReg(multiplierReg);//释放常数寄存器
+                    } else {
+                        int l = (int) (Math.floor(Math.log(multiplier * divisor) / Math.log(2)) - 32);
+                        String multiplierReg = getReg(String.valueOf(multiplier));
+                        addMIPSCode(new MIPSCode(MIPSOperator.li, (int) (multiplier - Math.pow(2, 32)), null, multiplierReg));
+                        addMIPSCode(new MIPSCode(MIPSOperator.mult, opReg, multiplierReg, null));
+                        addMIPSCode(new MIPSCode(MIPSOperator.mfhi, null, null, desReg));
+                        addMIPSCode(new MIPSCode(MIPSOperator.addu, desReg, opReg, desReg));
+                        addMIPSCode(new MIPSCode(MIPSOperator.sra, desReg, l, desReg));
+
+                        addMIPSCode(new MIPSCode(MIPSOperator.slt, opReg, "$0", multiplierReg));//被除数为负数置1
+                        addMIPSCode(new MIPSCode(MIPSOperator.addu, desReg, multiplierReg, desReg));
+                        freeReg(multiplierReg);//释放常数寄存器
+                    }
+                } else {//无法进行优化
+                    String immReg = getReg(String.valueOf(divisor));
+                    addMIPSCode(new MIPSCode(MIPSOperator.li, divisor, null, immReg));//常数opNum赋值给寄存器
+                    addMIPSCode(new MIPSCode(MIPSOperator.div, opReg, immReg, null));
+                    addMIPSCode(new MIPSCode(MIPSOperator.mflo, null, null, desReg));
+                    freeReg(immReg);//释放常数寄存器
+                }
+                if (isNegate) {
+                    addMIPSCode(new MIPSCode(MIPSOperator.subu, "$0", desReg, desReg));
+                }
+            }
+        }
+    }
+
+    public void optimizeMod(String opReg, int opNum, String desReg) {//取模运算优化为a - a / b * b，从而运用前面除法的优化方法
+        if (!optimizeMod) {
+            String immReg = getReg(String.valueOf(opNum));
+            addMIPSCode(new MIPSCode(MIPSOperator.li, curIRCode.getOpNum2(), null, immReg));//常数赋值给寄存器
+            addMIPSCode(new MIPSCode(MIPSOperator.div, opReg, immReg, null));
+            addMIPSCode(new MIPSCode(MIPSOperator.mfhi, null, null, desReg));
+            freeReg(immReg);//释放常数寄存器
+        } else {
+            boolean isNegate = opNum < 0;
+            if (isNegate) {
+                opNum = -opNum;//后面都考虑非负整数,mod符号与除数无关
+            }
+            if (opNum == 1) {
+                addMIPSCode(new MIPSCode(MIPSOperator.li, 0, null, desReg));
+            } else {
+                optimizeDiv(opReg, opNum, desReg);
+                String immReg = getReg(String.valueOf(opNum));
+                addMIPSCode(new MIPSCode(MIPSOperator.li, opNum, null, immReg));
+                addMIPSCode(new MIPSCode(MIPSOperator.mult, desReg, immReg, null));
+                addMIPSCode(new MIPSCode(MIPSOperator.mflo, null, null, desReg));
+                addMIPSCode(new MIPSCode(MIPSOperator.subu, opReg, desReg, desReg));
+                freeReg(immReg);//释放常数寄存器
+            }
+
+        }
+    }
+
+    public long chooseMultiplier(int d, int N) {
+        int l = 0;
+        while (l < 32) {
+            long m_low = (long) Math.ceil(Math.pow(2, N + l) / d);
+            long m_high = (long) Math.floor((Math.pow(2, N + l) + Math.pow(2, l)) / d);
+            if (m_low <= m_high) {
+                return m_low;
+            }
+            l++;
+        }
+        return -1;
+    }
+
+    public int nearPowerOfTwo(int num) {
+        for (int i = 1; i <= 3; i++) {
+            if (isPowerOfTwo(num + i)) {
+                return i;
+            } else if (isPowerOfTwo(num - i)) {
+                return -i;
+            }
+        }
+        return 0;
+    }
+
+    public boolean isPowerOfTwo(int num) {
+        return num > 0 && (num & (num - 1)) == 0;
+    }
+
     public void addMIPSCode(MIPSCode code) {
         mipsCode.add(code);
     }
@@ -1314,6 +1655,11 @@ public class MIPSGenerator {
 
     public void getIRCode() {
         while (irCodeIndex < irCodes.size() && irCodes.get(irCodeIndex).isNote()) {
+            if (optimizeTempReg && irCodes.get(irCodeIndex).isBasicBlockEnd()) {
+                //基本块结束，释放临时寄存器
+                freeTempReg();
+            }
+            addMIPSCode(new MIPSCode(MIPSOperator.note, null, null, irCodes.get(irCodeIndex).getResultIdent()));
             irCodeIndex++;
         }
         if (irCodeIndex >= irCodes.size()) {
@@ -1321,6 +1667,10 @@ public class MIPSGenerator {
         } else {
             curIRCode = irCodes.get(irCodeIndex);
             irCodeIndex++;
+            if (optimizeTempReg && curIRCode.isBasicBlockEnd()) {
+                //基本块结束，释放临时寄存器
+                freeTempReg();
+            }
         }
     }
 
@@ -1351,7 +1701,7 @@ public class MIPSGenerator {
                 return register.getName();
             }
         }
-        throw new RegisterError("can't find register");
+        throw new RegisterError("can't find register for " + name);
         //return null;
     }
 
@@ -1366,6 +1716,75 @@ public class MIPSGenerator {
             }
         }
     }
+
+    public void allocateTempReg(String name, MIPSTableItem item) {
+        for (Register register : registers) {
+            if (register.isAvailable() && register.getName().equals(name)) {
+                register.setTempBusy(item);
+                busyRegs.add(register.getName());
+                busyRegNum++;
+                return;
+            }
+        }
+    }
+
+    public void freeTempReg() {
+        //释放局部变量使用的临时寄存器池$t6~$t9
+        for (int i = 6; i <= 9; i++) {
+            if (!registers.get(i).isAvailable()) {
+                registers.get(i).setAvailable();
+                busyRegs.remove(registers.get(i).getName());
+                busyRegNum--;
+            }
+        }
+    }
+
+
+    public void allocateGlobalReg(String name, MIPSTableItem item) {
+        for (Register register : globalRegisters) {
+            if (register.isAvailable() && register.getName().equals(name)) {
+                register.setGlobalBusy(item);
+                funcUseGlobalReg.get(nowFunc.getTableItem()).add(register);
+                return;
+            }
+        }
+    }
+
+    public void preventGlobalReg(TableItem calledFuncItem) {
+        ArrayList<Register> calledFuncUseGlobalReg = funcUseGlobalReg.get(calledFuncItem);
+        for (Register register : globalRegisters) {
+            if (!register.isAvailable() && calledFuncUseGlobalReg.contains(register)) {
+                //全局寄存器被分配，且在被调函数的闭包中，进行保护
+                addMIPSCode(new MIPSCode(MIPSOperator.sw, register.getName(), -register.getGlobalItem().getOffset() - 4, "$fp"));
+            }
+        }
+    }
+
+    public void recoverGlobalReg(TableItem calledFuncItem) {
+        ArrayList<Register> calledFuncUseGlobalReg = funcUseGlobalReg.get(calledFuncItem);
+        for (Register register : globalRegisters) {
+            if (!register.isAvailable() && calledFuncUseGlobalReg.contains(register)) {
+                //全局寄存器被分配，且在被调函数的闭包中，进行恢复
+                addMIPSCode(new MIPSCode(MIPSOperator.lw, "$fp", -register.getGlobalItem().getOffset() - 4, register.getName()));
+            }
+        }
+    }
+
+    public void freeGlobalReg() {
+        for (Register register : globalRegisters) {
+            register.setAvailable();
+        }
+    }
+
+    public void addFuncUseGlobalRegClosure(ArrayList<Register> calledFuncUseGlobalReg) {
+        ArrayList<Register> thisFuncUseGlobalReg = funcUseGlobalReg.get(nowFunc.getTableItem());
+        for (Register register : calledFuncUseGlobalReg) {
+            if (!thisFuncUseGlobalReg.contains(register)) {
+                thisFuncUseGlobalReg.add(register);
+            }
+        }
+    }
+
 
     public MIPSTableItem getVarConstParamItem(String name) {
         for (int i = level; i >= 0; i--) {
@@ -1398,5 +1817,16 @@ public class MIPSGenerator {
             }
         }
         return -1;
+    }
+
+    public void setOptimize(boolean optimize) {
+        this.optimize = optimize;
+        this.optimizeMul = optimize;
+        this.optimizeDiv = false;
+        this.optimizeMod = false;
+        this.optimizeMips = optimize;
+        this.optimizeGlobalReg = optimize;
+        this.optimizeTempReg = false;
+        this.optimizeBlock = optimize;
     }
 }

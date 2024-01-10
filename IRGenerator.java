@@ -18,6 +18,7 @@ public class IRGenerator {
     private ArrayList<String> loopCheckInLabelList = new ArrayList<>();
     private ArrayList<String> loopOutLabelList = new ArrayList<>();
     private ArrayList<String> loopUpdateLabelList = new ArrayList<>();
+    private ArrayList<String> loopInLabelList = new ArrayList<>();
     private int loopNum = 0;
 
     private int condReg = 0;
@@ -33,6 +34,8 @@ public class IRGenerator {
 
     private boolean isGlobal = false;
     private int printStrNum = 0;
+
+    boolean optimize = false;
 
     public IRGenerator(GrammarNode tree) {
         try {
@@ -591,28 +594,40 @@ public class IRGenerator {
         } else if (firstChild.isName("if")) {
             addIRCode(new IRCode(IROperator.note, null, null, "if"));
             if (children.size() == 5) {//if
-                genCond(children.get(2));
-                addIRCode(new IRCode(IROperator.BEQ, "#t" + condReg, 0, "if_out" + labelNum++));
-                String outLabel = "if_out" + (labelNum - 1);
+                String inLabel = "if_in" + labelNum;
+                String outLabel = "if_out" + labelNum++;
+                genCond(children.get(2), outLabel, inLabel, false);
+                if (!optimize) {
+                    //优化模式下，直接在顶层LOr中跳转到出口
+                    addIRCode(new IRCode(IROperator.BEQ, "#t" + condReg, 0, outLabel));
+                }
+                addIRCode(new IRCode(IROperator.LABEL, null, null, inLabel));
                 genStmt(children.get(4));
                 addIRCode(new IRCode(IROperator.LABEL, null, null, outLabel));
             } else if (children.size() == 7) {//if_else
-                genCond(children.get(2));
-                addIRCode(new IRCode(IROperator.BEQ, "#t" + condReg, 0, "else" + labelNum++));
-                String elseLabel = "else" + (labelNum - 1);
+                String inLabel = "if_in" + labelNum;
+                String elseLabel = "else" + labelNum;
+                String outLabel = "if_out" + labelNum++;
+                genCond(children.get(2), elseLabel, inLabel, false);
+                if (!optimize) {
+                    //优化模式下，直接在顶层LOr中跳转到出口
+                    addIRCode(new IRCode(IROperator.BEQ, "#t" + condReg, 0, elseLabel));
+                }
+                addIRCode(new IRCode(IROperator.LABEL, null, null, inLabel));
                 genStmt(children.get(4));
-                addIRCode(new IRCode(IROperator.JMP, null, null, "if_out" + labelNum++));
-                String outLabel = "if_out" + (labelNum - 1);
+                addIRCode(new IRCode(IROperator.JMP, null, null, outLabel));
                 addIRCode(new IRCode(IROperator.LABEL, null, null, elseLabel));
                 genStmt(children.get(6));
                 addIRCode(new IRCode(IROperator.LABEL, null, null, outLabel));
             }
         } else if (firstChild.isName("for")) {
+            addIRCode(new IRCode(IROperator.note, null, null, "for"));
             loopNum++;
             int nowLoopNum = loopNum - 1;
             loopOutLabelList.add(null);
             loopUpdateLabelList.add(null);
             loopCheckInLabelList.add(null);
+            loopInLabelList.add(null);
             int pos = 2;
             if (children.get(pos).isName("ForStmt")) {
                 genForStmt(children.get(pos));
@@ -620,15 +635,35 @@ public class IRGenerator {
             } else {
                 pos++;//跳过;
             }
-            addIRCode(new IRCode(IROperator.LABEL, null, null, "checkin" + labelNum++));
-            String checkInLabel = "checkin" + (labelNum - 1);
-            loopCheckInLabelList.set(nowLoopNum, "checkin" + (labelNum - 1));
-            String outLabel = "out" + labelNum++;
+            int loopLabelNum = labelNum++;
+            String checkInLabel = null;
+            if (!optimize) {
+                checkInLabel = "for_checkin" + loopLabelNum;
+                loopCheckInLabelList.set(nowLoopNum, checkInLabel);
+            } else {
+                loopCheckInLabelList.set(nowLoopNum, null);
+            }
+            String outLabel = "for_out" + loopLabelNum;
             loopOutLabelList.set(nowLoopNum, outLabel);
+            String inLabel = "for_in" + loopLabelNum;
+            loopInLabelList.set(nowLoopNum, inLabel);
+            if (!optimize) {
+                //优化前逻辑，每次无条件跳转回checkin
+                addIRCode(new IRCode(IROperator.LABEL, null, null, checkInLabel));
+            }
+            boolean hasCheckIn = false;
+            GrammarNode checkInNode = null;
             if (children.get(pos).isName("Cond")) {
-                genCond(children.get(pos));
+                hasCheckIn = true;
+                checkInLabel = "for_checkin" + loopLabelNum;
+                loopCheckInLabelList.set(nowLoopNum, checkInLabel);
+                checkInNode = children.get(pos);
+                genCond(children.get(pos), outLabel, inLabel, false);
                 //int condReg = tempReg - 1;
-                addIRCode(new IRCode(IROperator.BEQ, "#t" + condReg, 0, outLabel));
+                if (!optimize) {
+                    //优化模式下，直接在顶层LOr中跳转到出口
+                    addIRCode(new IRCode(IROperator.BEQ, "#t" + condReg, 0, outLabel));
+                }
                 pos += 2;//跳过;
             } else {
                 pos++;//跳过;
@@ -640,32 +675,53 @@ public class IRGenerator {
             if (children.get(pos).isName("ForStmt")) {
                 hasUpdate = true;
                 updatePos = pos;
-                updateLabel = "update" + labelNum++;
+                updateLabel = "for_update" + loopLabelNum;
                 loopUpdateLabelList.set(nowLoopNum, updateLabel);
                 pos += 2;//跳过)
             } else {
                 pos++;//跳过)
             }
+            addIRCode(new IRCode(IROperator.LABEL, null, null, inLabel));
             genStmt(children.get(pos));
             if (hasUpdate) {
                 addIRCode(new IRCode(IROperator.LABEL, null, null, updateLabel));
                 genForStmt(children.get(updatePos));
             }
-            addIRCode(new IRCode(IROperator.JMP, null, null, checkInLabel));
+            if (!optimize) {
+                addIRCode(new IRCode(IROperator.JMP, null, null, checkInLabel));
+            } else {
+                //优化：首先判断是不是有checkin，有的话丢一个标签，并且解析Cond
+                if (hasCheckIn) {
+                    addIRCode(new IRCode(IROperator.LABEL, null, null, checkInLabel));
+                    genCond(checkInNode, outLabel, inLabel, true);
+                } else {
+                    //没有的话直接跳转回for_in
+                    addIRCode(new IRCode(IROperator.JMP, null, null, inLabel));
+                }
+            }
             addIRCode(new IRCode(IROperator.LABEL, null, null, outLabel));
+            addIRCode(new IRCode(IROperator.note, null, null, "for_end"));
             loopNum--;
         } else if (firstChild.isName("break") || firstChild.isName("continue")) {
             int nowLoopNum = loopNum - 1;
             if (firstChild.isName("break")) {
+                addIRCode(new IRCode(IROperator.note, null, null, "break"));
                 addIRCode(new IRCode(IROperator.OUTBLOCK, null, null, null));
                 addIRCode(new IRCode(IROperator.JMP, null, null, loopOutLabelList.get(nowLoopNum)));
             } else {
+                addIRCode(new IRCode(IROperator.note, null, null, "continue"));
                 if (loopUpdateLabelList.get(nowLoopNum) != null) {
                     addIRCode(new IRCode(IROperator.OUTBLOCK, null, null, null));
                     addIRCode(new IRCode(IROperator.JMP, null, null, loopUpdateLabelList.get(nowLoopNum)));
                 } else {
                     addIRCode(new IRCode(IROperator.OUTBLOCK, null, null, null));
-                    addIRCode(new IRCode(IROperator.JMP, null, null, loopCheckInLabelList.get(nowLoopNum)));
+                    if (!optimize) {
+                        addIRCode(new IRCode(IROperator.JMP, null, null, loopCheckInLabelList.get(nowLoopNum)));
+                    } else {
+                        //优化模式下，如果没有checkin需要跳转到for_in
+                        addIRCode(new IRCode(IROperator.JMP, null, null,
+                                loopCheckInLabelList.get(nowLoopNum) == null ? loopInLabelList.get(nowLoopNum) : loopCheckInLabelList.get(nowLoopNum)));
+                    }
                 }
             }
         } else if (firstChild.isName("return")) {
@@ -677,6 +733,7 @@ public class IRGenerator {
                 addIRCode(new IRCode(IROperator.RET, "#t" + expReg, null, null));
             }
         } else if (firstChild.isName("printf")) {
+            addIRCode(new IRCode(IROperator.note, null, null, "printf"));
             //node.print();
             int pos = 4;//或许是第一个输出数字
             String formatString = children.get(2).getNodeName();//字符串
@@ -714,35 +771,54 @@ public class IRGenerator {
         }
     }
 
-    public void genCond(GrammarNode node) {
+    //nearOut代表该条件表达式在出口的地方，否则在入口的地方
+    public void genCond(GrammarNode node, String outLabel, String inLabel, boolean nearOut) {
         unInitCond = true;
-        genLOrExp(node.getChild(0));
-        addIRCode(new IRCode(IROperator.LABEL, null, null, "or" + orSum++));
-        addIRCode(new IRCode(IROperator.LABEL, null, null, "and" + andSum++));
+        genLOrExp(node.getChild(0), true, outLabel, inLabel, nearOut);
+        if (!optimize) {
+            addIRCode(new IRCode(IROperator.LABEL, null, null, "or" + orSum++));
+            addIRCode(new IRCode(IROperator.LABEL, null, null, "and" + andSum++));
+        }
     }
 
-    public void genLOrExp(GrammarNode node) {
+    //isTop表示是否是顶层LOr
+    public void genLOrExp(GrammarNode node, boolean isTop, String outLabel, String inLabel, boolean nearOut) {
         ArrayList<GrammarNode> children = node.getChildren();
         if (children.get(0).isName("LAndExp")) {
             unInitCondAnd = true;
-            genLAndExp(children.get(0));
+            if (isTop) {
+                //该and语句集没有下一个or，直接跳转到出口处
+                genLAndExp(children.get(0), false, true, outLabel, inLabel, nearOut);
+            } else {
+                //该and语句集有下一个or，如果为0跳转到下一个or处
+                genLAndExp(children.get(0), true, true, outLabel, inLabel, nearOut);
+            }
             if (unInitCond) {
                 condReg = condAndReg;
                 unInitCond = false;
             }
         } else {
-            genLOrExp(children.get(0));
-            addIRCode(new IRCode(IROperator.LABEL, null, null, "or" + orSum++));
-            addIRCode(new IRCode(IROperator.BNE, "#t" + condReg, 0, "and" + andSum, true));
-            //int leftReg = tempReg - 1;
-            unInitCondAnd = true;
-            genLAndExp(children.get(2));
-            int rightReg = condAndReg;
-            addIRCode(new IRCode(IROperator.OR, "#t" + condReg, "#t" + rightReg, "#t" + condReg));
+            if (!optimize) {
+                genLOrExp(children.get(0), false, outLabel, inLabel, nearOut);
+                addIRCode(new IRCode(IROperator.LABEL, null, null, "or" + orSum++));
+                addIRCode(new IRCode(IROperator.BNE, "#t" + condReg, 0, "and" + andSum, true));
+                //int leftReg = tempReg - 1;
+                unInitCondAnd = true;
+                genLAndExp(children.get(2), !isTop, true, outLabel, inLabel, nearOut);
+                int rightReg = condAndReg;
+                addIRCode(new IRCode(IROperator.OR, "#t" + condReg, "#t" + rightReg, "#t" + condReg));
+            } else {
+                genLOrExp(children.get(0), false, outLabel, inLabel, nearOut);
+                addIRCode(new IRCode(IROperator.LABEL, null, null, "or" + orSum++));
+                unInitCondAnd = true;
+                genLAndExp(children.get(2), !isTop, true, outLabel, inLabel, nearOut);
+            }
         }
     }
 
-    public void genLAndExp(GrammarNode node) {
+    //hasNextOr表示是否有下一个or
+    //isLastOfOr表示是否是or语句集中的最后一个and，此时，如果是1应该跳转到下一个and
+    public void genLAndExp(GrammarNode node, boolean hasNextOr, boolean isLastOfOr, String outLabel, String inLabel, boolean nearOut) {
         ArrayList<GrammarNode> children = node.getChildren();
         if (children.get(0).isName("EqExp")) {
             genEqExp(children.get(0));
@@ -750,13 +826,59 @@ public class IRGenerator {
                 condAndReg = tempReg - 1;
                 unInitCondAnd = false;
             }
+            if (optimize) {
+                int eqReg = tempReg - 1;
+                if (!hasNextOr) {
+                    //没有下一个or
+                    if (!nearOut || !isLastOfOr) {
+                        //不在出口前，或者在出口前但不是or语句集中的最后一个and，如果为0跳转到出口处
+                        addIRCode(new IRCode(IROperator.BEQ, "#t" + eqReg, 0, outLabel));
+                    } else {
+                        //在出口前，且是or语句集中的最后一个and，如果为1跳转到入口处
+                        addIRCode(new IRCode(IROperator.BNE, "#t" + eqReg, 0, inLabel));
+                    }
+                } else {
+                    if (isLastOfOr) {
+                        //如果有下一个or，且是or语句集中的最后一个and，如果为1跳转到入口
+                        addIRCode(new IRCode(IROperator.BNE, "#t" + eqReg, 0, inLabel));
+                    } else {
+                        //如果有下一个or，且不是or语句集中的最后一个and，如果为0跳转到下一个or
+                        addIRCode(new IRCode(IROperator.BEQ, "#t" + eqReg, 0, "or" + orSum));
+                    }
+                }
+            }
         } else {
-            genLAndExp(children.get(0));
-            addIRCode(new IRCode(IROperator.LABEL, null, null, "and" + andSum++));
-            addIRCode(new IRCode(IROperator.BEQ, "#t" + condAndReg, 0, "or" + orSum, true));
-            genEqExp(children.get(2));
-            int rightReg = tempReg - 1;
-            addIRCode(new IRCode(IROperator.AND, "#t" + condAndReg, "#t" + rightReg, "#t" + condAndReg));
+            if (!optimize) {
+                genLAndExp(children.get(0), false, false, outLabel, inLabel, nearOut);
+                addIRCode(new IRCode(IROperator.LABEL, null, null, "and" + andSum++));
+                addIRCode(new IRCode(IROperator.BEQ, "#t" + condAndReg, 0, "or" + orSum, true));
+                genEqExp(children.get(2));
+                int rightReg = tempReg - 1;
+                addIRCode(new IRCode(IROperator.AND, "#t" + condAndReg, "#t" + rightReg, "#t" + condAndReg));
+            } else {
+                genLAndExp(children.get(0), false, false, outLabel, inLabel, nearOut);
+                addIRCode(new IRCode(IROperator.LABEL, null, null, "and" + andSum++));
+                genEqExp(children.get(2));
+                int rightReg = tempReg - 1;
+                if (!hasNextOr) {
+                    //没有下一个or
+                    if (!nearOut || !isLastOfOr) {
+                        //不在出口前，或者在出口前但不是or语句集中的最后一个and，如果为0跳转到出口处
+                        addIRCode(new IRCode(IROperator.BEQ, "#t" + rightReg, 0, outLabel));
+                    } else {
+                        //在出口前，且是or语句集中的最后一个and，如果为1跳转到入口处
+                        addIRCode(new IRCode(IROperator.BNE, "#t" + rightReg, 0, inLabel));
+                    }
+                } else {
+                    if (isLastOfOr) {
+                        //如果有下一个or，且是or语句集中的最后一个and，如果为1跳转到入口
+                        addIRCode(new IRCode(IROperator.BNE, "#t" + rightReg, 0, inLabel));
+                    } else {
+                        //如果有下一个or，且不是or语句集中的最后一个and，如果为0跳转到下一个or
+                        addIRCode(new IRCode(IROperator.BEQ, "#t" + rightReg, 0, "or" + orSum));
+                    }
+                }
+            }
         }
     }
 
@@ -869,5 +991,9 @@ public class IRGenerator {
 
     public ArrayList<IRCode> getIRList() {
         return irCodes;
+    }
+
+    public void setOptimize(boolean optimize) {
+        this.optimize = optimize;
     }
 }

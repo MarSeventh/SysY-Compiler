@@ -22,6 +22,12 @@ public class IRCode {
 
     private boolean needStay = false;
 
+    private boolean isDead = false;
+
+    private boolean isBasicBlockBegin = false;//是否是基本块的开始
+    private boolean isBasicBlockEnd = false;//是否是基本块的结束
+    BasicBlock basicBlock = null;//所属基本块
+
     public IRCode(IROperator operator, String opIdent1, String opIdent2, String resultIdent) {
         this.operator = operator;
         this.opIdent1 = opIdent1;
@@ -293,7 +299,7 @@ public class IRCode {
     }
 
     public boolean hasReturnValue() {
-        return opIdent1 != null;
+        return opIdent1 != null || op1IsNum;
     }
 
     //param push
@@ -315,14 +321,144 @@ public class IRCode {
         return operator == IROperator.main_begin;
     }
 
+    //设置常量
+    public void setOpNum1(int num) {
+        opNum1 = num;
+        op1IsNum = true;
+        printString = operator.toString() + ", " + opNum1 + ", " +
+                (op2IsNum ? opNum2 : opIdent2 == null ? "" : opIdent2) + ", " + (resultIdent == null ? "" : resultIdent);
+    }
+
+    public void setOpNum2(int num) {
+        opNum2 = num;
+        op2IsNum = true;
+        printString = operator.toString() + ", " + (op1IsNum ? opNum1 : opIdent1 == null ? "" : opIdent1) + ", " +
+                opNum2 + ", " + (resultIdent == null ? "" : resultIdent);
+    }
+
+    public void setOpIdent1(String ident) {
+        opIdent1 = ident;
+        if (ident != null) {
+            op1IsNum = false;
+            printString = operator.toString() + ", " + opIdent1 + ", " +
+                    (op2IsNum ? opNum2 : opIdent2 == null ? "" : opIdent2) + ", " + (resultIdent == null ? "" : resultIdent);
+        }
+    }
+
+    public void setOpIdent2(String ident) {
+        opIdent2 = ident;
+        if (ident != null) {
+            op2IsNum = false;
+            printString = operator.toString() + ", " + (op1IsNum ? opNum1 : opIdent1 == null ? "" : opIdent1) + ", " +
+                    opIdent2 + ", " + (resultIdent == null ? "" : resultIdent);
+        }
+    }
+
+    //标记为死代码
+    public void setDead() {
+        isDead = true;
+    }
+
+    public boolean isDead() {
+        return isDead;
+    }
+
+    public void setLive() {
+        isDead = false;
+    }
+
+    public void setBasicBlockBegin() {
+        isBasicBlockBegin = true;
+    }
+
+    public void setBasicBlockEnd() {
+        isBasicBlockEnd = true;
+    }
+
+    public boolean isBasicBlockBegin() {
+        return isBasicBlockBegin;
+    }
+
+    public boolean isBasicBlockEnd() {
+        return isBasicBlockEnd;
+    }
+
+    public void setBasicBlock(BasicBlock basicBlock) {
+        this.basicBlock = basicBlock;
+    }
+
+    public BasicBlock getBasicBlock() {
+        return basicBlock;
+    }
+
     public String print() {
         switch (operator) {
             case LABEL:
                 return resultIdent + ":";
             case note:
                 return "//" + resultIdent;
-            case func_begin, main_begin:
-                return "\n" + printString;
+            case main_begin:
+                return "\nint main()";
+            case main_end:
+                return "main end";
+            case block_begin:
+                return "block begin";
+            case block_end:
+                return "block end";
+            case func_begin:
+                return "\n" + defItem.getType() + " " + opIdent1 + "()";
+            case func_end:
+                return "function " + resultIdent + " end";
+            case ADD:
+                return resultIdent + " = " + (op1IsNum ? opNum1 : opIdent1) + " + " + (op2IsNum ? opNum2 : opIdent2);
+            case SUB:
+                return resultIdent + " = " + (op1IsNum ? opNum1 : opIdent1) + " - " + (op2IsNum ? opNum2 : opIdent2);
+            case MUL:
+                return resultIdent + " = " + (op1IsNum ? opNum1 : opIdent1) + " * " + (op2IsNum ? opNum2 : opIdent2);
+            case DIV:
+                return resultIdent + " = " + (op1IsNum ? opNum1 : opIdent1) + " / " + (op2IsNum ? opNum2 : opIdent2);
+            case MOD:
+                return resultIdent + " = " + (op1IsNum ? opNum1 : opIdent1) + " % " + (op2IsNum ? opNum2 : opIdent2);
+            case ASSIGN:
+                return resultIdent + " = " + (op1IsNum ? opNum1 : opIdent1) + (op2IsNum ? "[" + opNum2 + "]" : opIdent2 == null ? "" : "[" + opIdent2 + "]");
+            case AND:
+                return resultIdent + " = " + (op1IsNum ? opNum1 : opIdent1) + " && " + (op2IsNum ? opNum2 : opIdent2);
+            case OR:
+                return resultIdent + " = " + (op1IsNum ? opNum1 : opIdent1) + " || " + (op2IsNum ? opNum2 : opIdent2);
+            case NOT:
+                return resultIdent + " = !" + (op1IsNum ? opNum1 : opIdent1);
+            case SLT:
+                return resultIdent + " = " + (op1IsNum ? opNum1 : opIdent1) + " < " + (op2IsNum ? opNum2 : opIdent2);
+            case SLE:
+                return resultIdent + " = " + (op1IsNum ? opNum1 : opIdent1) + " <= " + (op2IsNum ? opNum2 : opIdent2);
+            case SEQ:
+                return resultIdent + " = " + (op1IsNum ? opNum1 : opIdent1) + " == " + (op2IsNum ? opNum2 : opIdent2);
+            case SNE:
+                return resultIdent + " = " + (op1IsNum ? opNum1 : opIdent1) + " != " + (op2IsNum ? opNum2 : opIdent2);
+            case SGE:
+                return resultIdent + " = " + (op1IsNum ? opNum1 : opIdent1) + " >= " + (op2IsNum ? opNum2 : opIdent2);
+            case SGT:
+                return resultIdent + " = " + (op1IsNum ? opNum1 : opIdent1) + " > " + (op2IsNum ? opNum2 : opIdent2);
+            case GETINT:
+                return resultIdent + " = getint()";
+            case PRINT_INT:
+                return "printInt(int_" + (op1IsNum ? opNum1 : opIdent1) + " of " + (op2IsNum ? opNum2 : opIdent2) + ")";
+            case PRINT_STR:
+                return "printStr(" + (opIdent1 == null ? "" : opIdent1) + ")";
+            case PRINT_PUSH:
+                return "printPush(" + (op1IsNum ? opNum1 : opIdent1 == null ? "" : opIdent1) + ")";
+            case ARRAY_GET:
+                return resultIdent + " = " + opIdent1 + "[" + (op2IsNum ? opNum2 : opIdent2) + "]";
+            case JMP:
+                return "goto " + resultIdent;
+            case DEF:
+                return "DEF " + opIdent1 + " " + (opIdent2 == null ? "" : opIdent2 + " ") + resultIdent;
+            case CALL:
+                return "CALL " + opIdent1;
+            case RET:
+                return "RET " + (op1IsNum ? opNum1 : opIdent1 == null ? "" : opIdent1);
+            case OUTBLOCK:
+                return "";
             default:
                 return printString;
         }

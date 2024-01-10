@@ -13,6 +13,7 @@ public class MIPSCode {
     private boolean op1IsNum = false;
 
     private ArrayList<String> defineLabelList = new ArrayList<>();
+    private boolean isDead = false;
 
     public MIPSCode(MIPSOperator operator, String opIdent1, String opIdent2, String resultIdent) {
         this.operator = operator;
@@ -78,7 +79,14 @@ public class MIPSCode {
     public boolean isBranch() {
         //bne, beq, bgt, ble, bge, blt,
         return operator == MIPSOperator.bne || operator == MIPSOperator.beq || operator == MIPSOperator.bgt ||
-                operator == MIPSOperator.ble || operator == MIPSOperator.bge || operator == MIPSOperator.blt;
+                operator == MIPSOperator.ble || operator == MIPSOperator.bge || operator == MIPSOperator.blt ||
+                operator == MIPSOperator.bgtz || operator == MIPSOperator.blez || operator == MIPSOperator.bgez ||
+                operator == MIPSOperator.bltz || operator == MIPSOperator.beqz || operator == MIPSOperator.bnez;
+    }
+
+    public boolean isBranchZero() {
+        return operator == MIPSOperator.bgtz || operator == MIPSOperator.blez || operator == MIPSOperator.bgez ||
+                operator == MIPSOperator.bltz || operator == MIPSOperator.beqz || operator == MIPSOperator.bnez;
     }
 
     public boolean isJmp() {
@@ -173,14 +181,14 @@ public class MIPSCode {
                 throw new MIPSCodeError("branch error!");
             }
             if (op2IsNum) {
-                printString += opNum;
+                printString += opNum + ", ";
             } else if (isRegister(opIdent2)) {
-                printString += opIdent2;
-            } else {
+                printString += opIdent2 + ", ";
+            } else if (!isBranchZero()) {
                 throw new MIPSCodeError("branch error!");
             }
             if (resultIdent != null) {
-                printString += ", " + resultIdent;
+                printString += resultIdent;
             } else {
                 throw new MIPSCodeError("branch error!");
             }
@@ -230,6 +238,8 @@ public class MIPSCode {
             }
         } else if (operator == MIPSOperator.strDefine) {
             printString += "\t" + resultIdent + ": .asciiz " + "\"" + opIdent1 + "\"";
+        } else if (operator == MIPSOperator.note) {
+            printString += "\t# " + resultIdent;
         }
         printString += "\n";
         return printString;
@@ -249,7 +259,7 @@ public class MIPSCode {
                 printString += "(" + opIdent1 + ")";
             }
         } else if (opIdent1 != null) {//是标识符
-            if (op2IsNum) {
+            if (op2IsNum && opNum != 0) {
                 printString += opIdent1 + " + " + opNum;
             } else {
                 printString += opIdent1;
@@ -266,5 +276,55 @@ public class MIPSCode {
 
     public boolean isRedefinedLable(String name) {
         return defineLabelList.contains(name);
+    }
+
+    public MIPSOperator getOperator() {
+        return operator;
+    }
+
+    public void setDead() {
+        isDead = true;
+    }
+
+    public boolean isDead() {
+        return isDead;
+    }
+
+    public String getOpIdent1() {
+        return opIdent1;
+    }
+
+    public String getOpIdent2() {
+        return opIdent2;
+    }
+
+    public String getResultIdent() {
+        return resultIdent;
+    }
+
+    public void setOpIdent1(String opIdent1) {
+        this.opIdent1 = opIdent1;
+        op1IsNum = false;
+    }
+
+    public void setOpIdent2(String opIdent2) {
+        this.opIdent2 = opIdent2;
+        op2IsNum = false;
+    }
+
+    public boolean op1IsNum() {
+        return op1IsNum;
+    }
+
+    public boolean op2IsNum() {
+        return op2IsNum;
+    }
+
+    public int getOpNum2() {
+        return opNum;
+    }
+
+    public int getOpNum1() {
+        return opNum;
     }
 }

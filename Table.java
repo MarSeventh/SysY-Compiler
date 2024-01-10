@@ -33,6 +33,15 @@ public class Table {
         return false;
     }
 
+    public TableItem getItemByName(String name) {
+        for (TableItem item : tableItems) {
+            if (item.getName().equals(name)) {
+                return item;
+            }
+        }
+        return null;
+    }
+
     public TableItem getItem(String name, String kind) {
         for (TableItem item : tableItems) {
             if (item.getName().equals(name) && item.getKind().equals(kind)) {
@@ -47,5 +56,15 @@ public class Table {
             return null;
         }
         return tableItems.get(tableItems.size() - 1);
+    }
+
+    public void colon(Table originTable) {
+        for (TableItem item : originTable.tableItems) {
+            addItem(item);
+        }
+    }
+
+    public void clear() {
+        tableItems.clear();
     }
 }

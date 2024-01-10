@@ -16,6 +16,12 @@ public class TableItem {
 
     private boolean isGlobal = false;//是否是全局变量
 
+    private boolean hasGlobalReg = false;//是否被分配了全局寄存器
+    private String globalRegName = null;//全局寄存器名字
+
+    private boolean hasTempReg = false;//是否被分配了临时寄存器
+    private String tempRegName = null;//临时寄存器名字
+
     public TableItem(String name, String type, String kind, int level, int dimension) {
         this.name = name;
         this.type = type;
@@ -114,5 +120,31 @@ public class TableItem {
 
     public boolean isGlobal() {
         return isGlobal;
+    }
+
+    public void allocateGlobalReg(String regName) {
+        hasGlobalReg = true;
+        globalRegName = regName;
+    }
+
+    public boolean hasGlobalReg() {
+        return hasGlobalReg;
+    }
+
+    public String getGlobalRegName() {
+        return globalRegName;
+    }
+
+    public void allocateTempReg(String regName) {
+        hasTempReg = true;
+        tempRegName = regName;
+    }
+
+    public boolean hasTempReg() {
+        return hasTempReg;
+    }
+
+    public String getTempRegName() {
+        return tempRegName;
     }
 }

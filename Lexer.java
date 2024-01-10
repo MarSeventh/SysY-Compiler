@@ -1,3 +1,4 @@
+import java.io.BufferedWriter;
 import java.io.FileReader;
 import java.util.Scanner;
 
@@ -10,10 +11,13 @@ public class Lexer {
     private String token = "";
     private LexType lexType;
     private int number = 0;
+    private boolean print = false;
+    private BufferedWriter out;
 
-    public Lexer(String filename) {
+    public Lexer(String filename, BufferedWriter out) {
         try {
             scanner = new Scanner(new FileReader(filename));
+            this.out = out;
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -65,7 +69,7 @@ public class Lexer {
                 catToken();
                 lexType = LexType.STRCON;
             } else {
-                error("expression lack of right \"");
+                Error.lexerError(lineNum, curLine, "expression lack of right \"", "a");
                 lexType = LexType.ERR;
             }
         } else if (curChar == '!') {
@@ -86,7 +90,7 @@ public class Lexer {
                 lexType = LexType.AND;
             } else {
                 retract();
-                error("wrong character after &");
+                Error.lexerError(lineNum, curLine, "wrong character after &", "a");
                 lexType = LexType.ERR;
             }
         } else if (curChar == '|') {
@@ -97,7 +101,7 @@ public class Lexer {
                 lexType = LexType.OR;
             } else {
                 retract();
-                error("wrong character after |");
+                Error.lexerError(lineNum, curLine, "wrong character after |", "a");
                 lexType = LexType.ERR;
             }
         } else if (curChar == '<') {
@@ -147,6 +151,7 @@ public class Lexer {
                     getChar();
                 }
                 next();
+                return;
             } else if (curChar == '*') {
                 getChar();
                 if (curChar == '/') {
@@ -207,8 +212,17 @@ public class Lexer {
             catToken();
             lexType = LexType.RBRACE;
         } else {
-            error("wrong character" + curChar);
+            Error.lexerError(lineNum, curLine, "wrong character" + curChar, "a");
             lexType = LexType.ERR;
+        }
+        if (print) {
+            try {
+                if (lexType != LexType.ERR && lexType != LexType.EOF) {
+                    out.write(lexType.toString() + " " + token + "\n");
+                }
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 
@@ -224,8 +238,8 @@ public class Lexer {
         return number;
     }
 
-    public void error(String msg) {
-        System.out.println("Error at line " + lineNum + ": " + curLine + "\n" + msg + "\n");
+    public int getLineNum() {
+        return lineNum;
     }
 
     public void clearToken() {

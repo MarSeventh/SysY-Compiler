@@ -12,7 +12,9 @@ public class Error {
 
     static {
         try {
-            out = new BufferedWriter(new FileWriter("error.txt"));
+            if (print) {
+                out = new BufferedWriter(new FileWriter("error.txt"));
+            }
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -30,6 +32,15 @@ public class Error {
         System.out.println("Error at line " + lineNum + ": (errorCode = " + errorCode + ")\n" + msg + "\n");
     }
 
+    public static void calError() {
+        //System.out.println("calculate const exp error");
+        Calculator.setIsConst(false);
+    }
+
+    public static void mipsError(String msg) {
+        System.out.println("MIPS Error: " + msg + "\n");
+    }
+
     public static void printError(int line, String errorCode) {
         if (print) {
             try {
@@ -43,13 +54,15 @@ public class Error {
 
     public static void print() {
         try {
-            List<Map.Entry<Integer, Integer>> linelist = new ArrayList<>(errorLine.entrySet());
-            Collections.sort(linelist, Comparator.comparing(Map.Entry::getValue));
-            for (Map.Entry<Integer, Integer> integerIntegerEntry : linelist) {
-                int line = integerIntegerEntry.getValue();
-                out.write(line + " " + errorList.get(integerIntegerEntry.getKey()) + "\n");
+            if (print) {
+                List<Map.Entry<Integer, Integer>> linelist = new ArrayList<>(errorLine.entrySet());
+                Collections.sort(linelist, Comparator.comparing(Map.Entry::getValue));
+                for (Map.Entry<Integer, Integer> integerIntegerEntry : linelist) {
+                    int line = integerIntegerEntry.getValue();
+                    out.write(line + " " + errorList.get(integerIntegerEntry.getKey()) + "\n");
+                }
+                out.close();
             }
-            out.close();
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

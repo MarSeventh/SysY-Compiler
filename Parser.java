@@ -38,12 +38,13 @@ public class Parser {
         tableStack.put(level, curTable);
     }
 
-    public void parse() {
+    public GrammarNode parse() {
         getWord();
         lastWord = curWord;
         if (curType != LexType.EOF) {
             parseCompUnit();
         }
+        return tree;
     }
 
     public void getWord() {
@@ -245,12 +246,15 @@ public class Parser {
             Error.printError(curWord.getLineNum(), "b");
         }
         int dim = 0;
+        ArrayList<Integer> dimenLength = new ArrayList<>();
         node.addChild(parseIdent());
         while (curType == LexType.LBRACK) {
             dim++;
             node.addChild(new GrammarNode("["));
             getWord();
-            node.addChild(parseConstExp());
+            GrammarNode node1 = parseConstExp();
+            node.addChild(node1);
+            dimenLength.add(Calculator.calConstExp(node1, tableStack, level));
             if (curType == LexType.RBRACK) {
                 node.addChild(new GrammarNode("]"));
                 getWord();
@@ -259,15 +263,22 @@ public class Parser {
                 Error.printError(lastWord.getLineNum(), "k");
             }
         }
-        curTable.addItem(new TableItem(constName, "int", "const", level, dim));
+        ArrayList<Integer> arrayConstInit = new ArrayList<>();
         if (curType == LexType.ASSIGN) {
             node.addChild(new GrammarNode("="));
             getWord();
-            node.addChild(parseConstInitVal());
+            node.addChild(parseConstInitVal(arrayConstInit));
             printToFile("ConstDef");
         } else {
             Error.syntaxError(lastWord.getLineNum(), "wrong const define", "e");
         }
+        TableItem constItem = new TableItem(constName, "int", "const", level, dim);
+        constItem.setArrayDimen(dimenLength);//保存数组每一维大小
+        constItem.setArrayConstInit(arrayConstInit);//保存数组初值
+        if (dim == 0) {
+            constItem.setConstInit(arrayConstInit.get(0));//保存常数初值
+        }
+        curTable.addItem(constItem);
         return node;
     }
 
@@ -279,12 +290,15 @@ public class Parser {
             Error.printError(curWord.getLineNum(), "b");
         }
         int dim = 0;
+        ArrayList<Integer> dimenLength = new ArrayList<>();
         node.addChild(parseIdent());
         while (curType == LexType.LBRACK) {
             dim++;
             node.addChild(new GrammarNode("["));
             getWord();
-            node.addChild(parseConstExp());
+            GrammarNode node1 = parseConstExp();
+            node.addChild(node1);
+            dimenLength.add(Calculator.calConstExp(node1, tableStack, level));
             if (curType == LexType.RBRACK) {
                 node.addChild(new GrammarNode("]"));
                 getWord();
@@ -293,7 +307,9 @@ public class Parser {
                 Error.printError(lastWord.getLineNum(), "k");
             }
         }
-        curTable.addItem(new TableItem(varName, "int", "var", level, dim));
+        TableItem varItem = new TableItem(varName, "int", "var", level, dim);
+        varItem.setArrayDimen(dimenLength);
+        curTable.addItem(varItem);
         if (curType == LexType.ASSIGN) {
             node.addChild(new GrammarNode("="));
             getWord();
@@ -320,18 +336,22 @@ public class Parser {
         return node;
     }
 
-    public GrammarNode parseConstInitVal() {
+    public GrammarNode parseConstInitVal(ArrayList<Integer> arrayConstInit) {
         GrammarNode node = new GrammarNode("ConstInitVal");
         if (curType != LexType.LBRACE) {
-            node.addChild(parseConstExp());
+            GrammarNode node1 = parseConstExp();
+            node.addChild(node1);
+            arrayConstInit.add(Calculator.calConstExp(node1, tableStack, level));
         } else {
             node.addChild(new GrammarNode("{"));
             getWord();
-            node.addChild(parseConstInitVal());
+            if (curType != LexType.RBRACE) {
+                node.addChild(parseConstInitVal(arrayConstInit));
+            }
             while (curType == LexType.COMMA) {
                 node.addChild(new GrammarNode(","));
                 getWord();
-                node.addChild(parseConstInitVal());
+                node.addChild(parseConstInitVal(arrayConstInit));
             }
             if (curType != LexType.RBRACE) {
                 Error.syntaxError(lastWord.getLineNum(), "lack '}' after constInitVal", "e");
@@ -351,7 +371,9 @@ public class Parser {
         } else {
             node.addChild(new GrammarNode("{"));
             getWord();
-            node.addChild(parseInitVal());
+            if (curType != LexType.RBRACE) {
+                node.addChild(parseInitVal());
+            }
             while (curType == LexType.COMMA) {
                 node.addChild(new GrammarNode(","));
                 getWord();
@@ -447,7 +469,7 @@ public class Parser {
                 } else {
                     for (int i = 0; i < parasRNum; i++) {
                         if ((int) parasRDimen.get(i) != funcItem.getParasDimen().get(i)) {
-                            Error.meaningError(funcLine, "wrong paras type", "d");
+                            Error.meaningError(funcLine, "wrong paras type " + i, "d");
                             Error.printError(funcLine, "e");
                         }
                     }
@@ -495,11 +517,13 @@ public class Parser {
         GrammarNode node = new GrammarNode("FuncRParams");
         node.addChild(parseExp());
         parasRDimen.add(paraRDimen);
+        paraRDimen = 0;
         while (curType == LexType.COMMA) {
             node.addChild(new GrammarNode(","));
             getWord();
             node.addChild(parseExp());
             parasRDimen.add(paraRDimen);
+            paraRDimen = 0;
         }
         printToFile("FuncRParams");
         return node;
@@ -811,7 +835,7 @@ public class Parser {
                 numCnt--;
                 node.addChild(new GrammarNode(","));
                 getWord();
-                parseExp();
+                node.addChild(parseExp());
             }
             if (numCnt != 0) {
                 Error.meaningError(printLine, "printf string and exp not match", "l");
@@ -1054,6 +1078,8 @@ public class Parser {
                 return tableStack.get(i).getItem(name, "var");
             } else if (tableStack.get(i).hasItem(name, "param")) {
                 return tableStack.get(i).getItem(name, "param");
+            } else if (tableStack.get(i).hasItem(name, "const")) {
+                return tableStack.get(i).getItem(name, "const");
             }
         }
         return null;

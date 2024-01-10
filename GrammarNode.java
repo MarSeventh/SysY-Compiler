@@ -20,6 +20,13 @@ public class GrammarNode {
         return children;
     }
 
+    public GrammarNode getLastChild() {
+        if (children.isEmpty()) {
+            return null;
+        }
+        return children.get(children.size() - 1);
+    }
+
     public void print() {
         System.out.print(nodeName + " => ");
         for (GrammarNode child : children) {

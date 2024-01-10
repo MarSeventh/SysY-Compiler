@@ -61,13 +61,39 @@ public class Lexer {
         } else if (curChar == '"') {
             catToken();
             getChar();
+            int cnt = 0;
             while (curPos < curLine.length() && curChar != '"') {
+                if (!((int) curChar == 32 ||
+                        (int) curChar == 33 ||
+                        ((int) curChar >= 40 && (int) curChar <= 126) || curChar == '%')) {
+                    Error.printError(lineNum, "a");
+                }
+                if (curChar == '%') {
+                    catToken();
+                    getChar();
+                    if (curChar != 'd') {
+                        Error.printError(lineNum, "a");
+                    } else {
+                        cnt++;
+                    }
+                }
+                if (curChar == '\\') {
+                    catToken();
+                    getChar();
+                    if (curChar != 'n') {
+                        Error.printError(lineNum, "a");
+                    }
+                }
+                if (curChar == '"') {
+                    break;
+                }
                 catToken();
                 getChar();
             }
             if (curChar == '"') {
                 catToken();
                 lexType = LexType.STRCON;
+                number = cnt;
             } else {
                 Error.lexerError(lineNum, curLine, "expression lack of right \"", "a");
                 lexType = LexType.ERR;
